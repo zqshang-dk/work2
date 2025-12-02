@@ -349,17 +349,27 @@ int main() {
     // 原始文件路径 (使用了 R"()" 语法，不需要双斜杠)
     string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\CUSV_20212220_BDS_M0.5_I1.0_G2.0.txt)";
     string outfile_path = "outpos_total.txt";
+    string blhfile_path = "blh_results.txt";
 
     ifstream infile(filename);
     ofstream outfile(outfile_path);
+    ofstream blhfile(blhfile_path);  // 新增
 
     if (!infile.is_open()) {
         cerr << "错误：无法打开文件 " << filename << endl;
         return -1;
     }
+     
+    if (!blhfile.is_open()) {
+        cerr << "错误：无法创建BLH输出文件" << endl;
+        return -1;
+    }
 
     // 设置输出精度为小数点后3位
     outfile << fixed << setprecision(3);
+    blhfile << fixed << setprecision(8); 
+
+    blhfile << "# 格式: Epoch Week TOW avg_lat(deg) avg_lon(deg) avg_h(m)\n";
 
     string line;
     while (getline(infile, line)) {
@@ -485,6 +495,18 @@ int main() {
                     // // 分隔线
                     // outfile << "------------------------------------------------------------" << endl;
 
+                    // ===== 新增：输出到独立的BLH文件 =====
+                    blhfile << setw(5) << time_info.epoch_num  // Epoch
+                            << setw(6) << time_info.week       // Week
+                            << setw(14) << fixed << setprecision(4) << time_info.tow  // TOW
+                            << "  "  // 两个空格分隔
+                            << setw(15) << fixed << setprecision(8) << Lat    // Latitude
+                            << " "
+                            << setw(15) << fixed << setprecision(8) << Lon    // Longitude
+                            << " "
+                            << setw(12) << fixed << setprecision(4) << H      // Height
+                            << "\n";
+
                     // 保存历元结果
                     all_results.push_back(res.Parameter);
                 }
@@ -495,6 +517,7 @@ int main() {
 
     infile.close();
     outfile.close();
+    blhfile.close();
     cout << "处理完成，结果已保存至 " << outfile_path << endl;
 
     // 如果收集到了结果，进行精度评估
