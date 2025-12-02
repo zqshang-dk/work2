@@ -1,4 +1,4 @@
-// 修改后的完整程序（在你的基础上做了最小侵入的改动并添加了系统分组、PRN记录、ECEF->BLH 转换以及输出）
+// 修改后的完整程序（修复了所有编译和逻辑错误）
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -204,22 +204,23 @@ struct EvalResult {
     double rmsE, rmsN, rmsU;
 };
 
-// evaluate 函数保持（微调：可以复用你原实现）
+// evaluate 函数保持（修复了向量访问的错误）
 EvalResult evaluate(const vector<Vector4d>& allPos,
                     double X0, double Y0, double Z0,
                     const string& out_prefix)
 {
-    int m = allPos.size();
     EvalResult R;
+    int m = allPos.size();
     if(m == 0){
         cerr << "错误：没有可评估的数据" << endl;
         return R;
     }
+    
     double sumX = 0, sumY = 0, sumZ = 0;
     for (size_t i = 0; i < m; i++) {
-        sumX += allPos;
-        sumY += allPos;
-        sumZ += allPos;
+        sumX += allPos[i](0);  // 修复：添加 [i]
+        sumY += allPos[i](1);
+        sumZ += allPos[i](2);
     }
     R.meanX = sumX / m;
     R.meanY = sumY / m;
@@ -227,13 +228,17 @@ EvalResult evaluate(const vector<Vector4d>& allPos,
 
     double sX=0, sY=0, sZ=0;
     for (size_t i = 0; i < m; i++) {
-        sX += pow(allPos - R.meanX, 2);
-        sY += pow(allPos - R.meanY, 2);
-        sZ += pow(allPos - R.meanZ, 2);
+        sX += pow(allPos[i](0) - R.meanX, 2);
+        sY += pow(allPos[i](1) - R.meanY, 2);
+        sZ += pow(allPos[i](2) - R.meanZ, 2);
     }
-    R.stdX = sqrt(sX/(m-1));
-    R.stdY = sqrt(sY/(m-1));
-    R.stdZ = sqrt(sZ/(m-1));
+    if (m > 1) {
+        R.stdX = sqrt(sX/(m-1));
+        R.stdY = sqrt(sY/(m-1));
+        R.stdZ = sqrt(sZ/(m-1));
+    } else {
+        R.stdX = R.stdY = R.stdZ = 0.0;
+    }
 
     vector<double> E, N, U;
     E.reserve(m); N.reserve(m); U.reserve(m);
@@ -243,13 +248,14 @@ EvalResult evaluate(const vector<Vector4d>& allPos,
         cerr << "错误：无法创建ENU输出文件" << endl;
         return R;
     }
+    f_enu << fixed << setprecision(4);
     f_enu << "Epoch   E(m)   N(m)   U(m)\n";
 
-    for (int i=0;i<m;i++){
+    for (int i=0; i<m; i++){
         Vector3d enu = ecef2enu(
-            allPos,
-            allPos,
-            allPos,
+            allPos[i](0),  // 修复：传递坐标值，不是向量
+            allPos[i](1),
+            allPos[i](2),
             X0, Y0, Z0
         );
         E.push_back(enu(0));
@@ -287,7 +293,7 @@ EvalResult evaluate(const vector<Vector4d>& allPos,
 
 int main() {
     vector<Vector4d> all_results;  // 存储每个历元的 X Y Z dt（平均后的）
-    string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\2059329.25ObsCorr.txt)";
+    string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\mydata\2059329.25ObsCorr)";
     string outfile_path = "outpos_total.txt";
     string outblh_path = "outpos_blh.txt";
     ifstream infile(filename);
@@ -444,21 +450,34 @@ int main() {
 
     cout << "处理完成，结果已保存至 " << outfile_path << " 和 " << outblh_path << endl;
 
-    // 如果收集到了结果，进行精度评估（使用第一个平均解作为参考）
+    // 如果收集到了结果，进行精度评估
     if (!all_results.empty()) {
-        double X0 = all_results;
-        double Y0 = all_results;
-        double Z0 = all_results;
-        vector<Vector4d> xyz_only;
-        for (auto &v : all_results) xyz_only.push_back(v);
-        EvalResult eval = evaluate(xyz_only, X0, Y0, Z0, "result");
+        // 使用均值作为参考点（更合理）
+        double sumX = 0, sumY = 0, sumZ = 0;
+        for (const auto& v : all_results) {
+            sumX += v(0);
+            sumY += v(1);
+            sumZ += v(2);
+        }
+        double X0 = sumX / all_results.size();
+        double Y0 = sumY / all_results.size();
+        double Z0 = sumZ / all_results.size();
+        
+        EvalResult eval = evaluate(all_results, X0, Y0, Z0, "result");
         ofstream eval_file("accuracy_evaluation.txt");
         eval_file << fixed << setprecision(4);
         eval_file << "========== 精度评估结果 ==========\n";
+        eval_file << "参考点: (" << X0 << ", " << Y0 << ", " << Z0 << ")\n";
+        eval_file << "总历元数: " << all_results.size() << "\n";
         eval_file << "位置均值: (" << eval.meanX << ", " << eval.meanY << ", " << eval.meanZ << ")\n";
         eval_file << "位置标准差: (" << eval.stdX << ", " << eval.stdY << ", " << eval.stdZ << ")\n";
         eval_file << "ENU均值: (" << eval.meanE << ", " << eval.meanN << ", " << eval.meanU << ")\n";
         eval_file << "ENU RMS: (" << eval.rmsE << ", " << eval.rmsN << ", " << eval.rmsU << ")\n";
+        
+        // 计算3D RMS
+        double rms3d = sqrt(eval.rmsE*eval.rmsE + eval.rmsN*eval.rmsN + eval.rmsU*eval.rmsU);
+        eval_file << "3D RMS: " << rms3d << " m\n";
+        
         eval_file.close();
         cout << "精度评估结果已保存至 accuracy_evaluation.txt" << endl;
     } else {
