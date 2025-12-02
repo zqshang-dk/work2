@@ -63,14 +63,7 @@ void pntpos(const vector<SatData>& obs, const EpochTime& time, vector<double>& o
     const int maxIter = 10;
     const double eps = 1e-4;  //收敛阈值（m）
 
-    for (int iter = 0; iter < maxIter; ++iter)
-    {
-        // double H[n][4];
-        //     H(i, 0) = (Xr - Xs) / P0;
-        //     H(i, 1) = (Yr - Ys) / P0;
-        //     H(i, 2) = (Zr - Zs) / P0;
-        //     H(i, 3) = 1;
-
+    for (int iter = 0; iter < maxIter; ++iter){
         //用Eigen来定义矩阵和向量
         MatrixXd H(n, 4);  //设计矩阵n*4
         VectorXd l(n);     //OMC观测值
@@ -112,37 +105,7 @@ void pntpos(const vector<SatData>& obs, const EpochTime& time, vector<double>& o
             break;
         }
     }
-
-
-        // for (int i = 0; i < n; i++)
-        // {
-            
-
-            
-        //     // 设计矩阵
-        //     //  double H[25][4] = [((Xr - Xs) / P0, (Yr - Ys) / P0, (Zr - Zs) / P0, 1),];
-            
-
-        //     // OMC观测值计算
-        //     double l[i] = P_obs - (P0 + c * dt);
-
-        //     // 构造权矩阵
-        //     double W[n][n];
-        //     W[i][i] = 1.0 / var;
-
-        //     double dx[4] = (H.transpose() * W * H).inverse() * (H.tranpose() * W * l[i]);
-        //     Xr += dx(0);
-        //     Yr += dx(1);
-        //     Zr += dx(2);
-        //     dt += dx(3);
-
-        //     if (dx.norm() < 1e-4)
-        //     {
-        //         break;
-        //     }
-        // }
         
-
     // 模拟输出结果 (这只是为了演示，你需要算出真实值)
     out_pos.resize(4);
     out_pos[0] = Xr; // 用户 X
@@ -203,12 +166,13 @@ int main() {
                 
                 pntpos(epoch_obs, time_info, result);
 
-                // 输出格式: GPSWeek  GPSSec  UserX  UserY  UserZ
-                outfile << time_info.week << " " 
-                        << time_info.tow << " " 
-                        << setw(14) << result[0] << " " 
-                        << setw(14) << result[1] << " " 
-                        << setw(14) << result[2] << endl;
+                // 输出格式: GPSWeek  GPSSec  UserX  UserY  UserZ dt
+                outfile << time_info.week << " "
+                        << time_info.tow << " "
+                        << setw(14) << result[0] << " "
+                        << setw(14) << result[1] << " "
+                        << setw(14) << result[2] << " "
+                        << setw(14) << result[3] << endl;
             }
         }
     }
