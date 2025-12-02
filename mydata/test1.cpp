@@ -37,7 +37,7 @@ struct EpochTime {
 struct SolveResult{
     VectorXd Parameter;
     double sigma0;  //验后单位权中误差
-    Matrix4d cov;   //验后参数协方差矩阵
+    //Matrix4d cov;   //验后参数协方差矩阵
     bool success;   //是否解算成功
 };
 
@@ -78,30 +78,34 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
     int n = cleaned_obs.size();
     
     // 如果卫星数少于4颗，无法定位
-    if (n < 4) {
+    if (n < 7) {
         return res;
     }
 
-    VectorXd x = VectorXd::Zero(7);
-    x.head<3>() = Vector3d(0, 0, 0);
+    // VectorXd x = VectorXd::Zero(7);
+    // x.head<3>() = Vector3d(0, 0, 0);
 
-    MatrixXd H(n, 7);  //设计矩阵
-    VectorXd l(n);     //OMC观测值
-    MatrixXd W = MatrixXd::Zero(n, n);  //创建一个n*n的零矩阵
+    
+    //数据初始化
+    double Xr = 0;
+    double Yr = 0;
+    double Zr = 0;
+    double dt_GPS = 0;
+    double dt_BDS = 0;
+    double dt_GLO = 0;
+    double dt_Gal = 0;
+
     //迭代参数
     const int maxIter = 15;
     const double eps = 1e-4;  //收敛阈值（m）
-    //数据初始化
-    // double Xr = 0;
-    // double Yr = 0;
-    // double Zr = 0;
-    // double dt = 0;
+    
+    MatrixXd H(n, 7);  //设计矩阵
+    VectorXd l(n);     //OMC观测值
+    MatrixXd W = MatrixXd::Zero(n, n);  //创建一个n*n的零矩阵
 
     for (int iter = 0; iter < maxIter; ++iter){
         //用Eigen来定义矩阵和向量    
-        H.setZero();
-        l.setZero();
-        W.setZero();
+        
         //填充H,l,W，此时需要遍历所有星历才可以实现
         for (int i = 0; i < n;i++){
             double P_obs = cleaned_obs[i].pseudorange;
@@ -109,15 +113,21 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
             double Ys = cleaned_obs[i].sat_y;
             double Zs = cleaned_obs[i].sat_z; 
             double Var = cleaned_obs[i].variance;
-            double P0 = sqrt((Xs - x(0)) * (Xs - x(0)) + (Ys - x(1)) * (Ys - x(1)) + (Zs - x(2)) * (Zs - x(2)));
+            //double P0 = sqrt((Xs - x(0)) * (Xs - x(0)) + (Ys - x(1)) * (Ys - x(1)) + (Zs - x(2)) * (Zs - x(2)));
+            
+            
             if(Var<=0)
                 Var = 1.0;
             
-            H.row(i).setZero();
+            double P0 = sqrt((Xs - Xr) * (Xs - Xr) + (Ys - Yr) * (Ys - Yr) + (Zs - Zr) * (Zs - Zr));
+            //H.row(i).setZero();
             
-            H(i, 0) = (x(0) - Xs) / P0;
-            H(i, 1) = (x(1) - Ys) / P0;
-            H(i, 2) = (x(2) - Zs) / P0;
+            // H(i, 0) = (x(0) - Xs) / P0;
+            // H(i, 1) = (x(1) - Ys) / P0;
+            // H(i, 2) = (x(2) - Zs) / P0;
+            H(i, 0) = (Xr - Xs) / P0;
+            H(i, 1) = (Yr - Ys) / P0;
+            H(i, 2) = (Zr - Zs) / P0;
             // H(i, 3) = 1.0;
 
             //OMC残差
@@ -137,15 +147,24 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
                 H(i, 3) = 1.0;  //如果没写的话默认是GPS卫星
             
             //观测方程中钟差的设置
+            // double dt_sys = 0.0;
+            // if (sys == 'G')
+            //     dt_sys = x(3);
+            // else if (sys == 'C')
+            //     dt_sys = x(4);
+            // else if (sys == 'E')
+            //     dt_sys = x(5);
+            // else if (sys == 'R')
+            //     dt_sys = x(6);
             double dt_sys = 0.0;
             if (sys == 'G')
-                dt_sys = x(3);
+                dt_sys = dt_GPS;
             else if (sys == 'C')
-                dt_sys = x(4);
+                dt_sys = dt_BDS;
             else if (sys == 'E')
-                dt_sys = x(5);
+                dt_sys = dt_Gal;
             else if (sys == 'R')
-                dt_sys = x(6);
+                dt_sys = dt_GLO;
 
             //OMC残差
             l(i) = P_obs - (P0 + dt_sys);
@@ -159,7 +178,14 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
         // Yr += dx(1);
         // Zr += dx(2);
         // dt += dx(3);
-        x += dx;
+        //x += dx;
+        Xr += dx(0);
+        Yr += dx(1);
+        Zr += dx(2);
+        dt_GPS+=dx(3);
+        dt_BDS+=dx(4);
+        dt_Gal+=dx(5);
+        dt_GLO += dx(6);
 
         double pos_delta = sqrt(dx(0) * dx(0) + dx(1) * dx(1) + dx(2) * dx(2));
         if(pos_delta<eps){
@@ -175,9 +201,10 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
         double Ys = cleaned_obs[i].sat_y;
         double Zs = cleaned_obs[i].sat_z;
         char sys = cleaned_obs[i].id[0];
-        double dt_sys = (sys=='G'?x(3):(sys=='C'?x(4):(sys=='E'?x(5):x(6))));
-        double dist = sqrt((Xs - x(0)) * (Xs - x(0)) + (Ys - x(1)) * (Ys - x(1)) + (Zs - x(2)) * (Zs - x(2)));
-
+        // double dt_sys = (sys=='G'?x(3):(sys=='C'?x(4):(sys=='E'?x(5):x(6))));
+        // double dist = sqrt((Xs - x(0)) * (Xs - x(0)) + (Ys - x(1)) * (Ys - x(1)) + (Zs - x(2)) * (Zs - x(2)));
+        double dist = sqrt((Xs - Xr) * (Xs - Xr) + (Ys - Yr) * (Ys - Yr) + (Zs - Zr) * (Zs - Zr));
+        double dt_sys = (sys=='G'?dt_GPS:(sys=='C'?dt_BDS:(sys=='E'?dt_Gal:dt_GLO)));
         double P_cal = dist + dt_sys;
         V(i) = P_cal - P_obs;
     }
@@ -193,7 +220,7 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
     //res.Parameter << x(0), x(1), x(2), dt;
     // res.Parameter.head<3>() = x.head<3>();
     // res.Parameter.tail<4>() = x.tail<4>();
-    res.Parameter = x;
+    res.Parameter << Xr, Yr, Zr, dt_GPS, dt_BDS, dt_Gal, dt_GLO;
     res.sigma0 = sigma0;
     //res.cov = Dxx;
     res.success = true;
@@ -347,7 +374,7 @@ int main() {
     vector<VectorXd> all_results;  // 存储每个历元的 X Y Z dt
 
     // 原始文件路径 (使用了 R"()" 语法，不需要双斜杠)
-    string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\CUSV_20212220_BDS_M0.5_I1.0_G2.0.txt)";
+    string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\mydata\2059329.25ObsCorr)";
     string outfile_path = "outpos_total.txt";
     string blhfile_path = "blh_results.txt";
 
@@ -530,14 +557,14 @@ int main() {
         EvalResult eval = evaluate(all_results, X0, Y0, Z0, "result");
         
         // 输出评估结果
-        ofstream eval_file("accuracy_evaluation.txt");
-        eval_file << fixed << setprecision(4);
-        eval_file << "========== 精度评估结果 ==========\n";
-        eval_file << "位置均值: (" << eval.meanX << ", " << eval.meanY << ", " << eval.meanZ << ")\n";
-        eval_file << "位置标准差: (" << eval.stdX << ", " << eval.stdY << ", " << eval.stdZ << ")\n";
-        // eval_file << "ENU均值: (" << eval.meanE << ", " << eval.meanN << ", " << eval.meanU << ")\n";
-        // eval_file << "ENU RMS: (" << eval.rmsE << ", " << eval.rmsN << ", " << eval.rmsU << ")\n";
-        eval_file.close();
+        // ofstream eval_file("accuracy_evaluation.txt");
+        // eval_file << fixed << setprecision(4);
+        // eval_file << "========== 精度评估结果 ==========\n";
+        // eval_file << "位置均值: (" << eval.meanX << ", " << eval.meanY << ", " << eval.meanZ << ")\n";
+        // eval_file << "位置标准差: (" << eval.stdX << ", " << eval.stdY << ", " << eval.stdZ << ")\n";
+        // // eval_file << "ENU均值: (" << eval.meanE << ", " << eval.meanN << ", " << eval.meanU << ")\n";
+        // // eval_file << "ENU RMS: (" << eval.rmsE << ", " << eval.rmsN << ", " << eval.rmsU << ")\n";
+        // eval_file.close();
         
         cout << "精度评估结果已保存至 accuracy_evaluation.txt" << endl;
     } else {
