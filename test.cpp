@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <cmath>
 #include <Eigen/Dense>
+
 using namespace std;
 using namespace Eigen;
 
@@ -29,17 +30,26 @@ struct EpochTime {
     double tow;    // 周内秒 (Time of Week)
 };
 
+//定义解算结果结构体
+struct SolveResult{
+    Vector4d Parameter;
+    double sigma0;  //验后单位权中误差
+    Matrix4d cov;   //验后参数协方差矩阵
+    bool success;   //是否解算成功
+};
 // 你的定位解算函数接口
 // 参数：
 //   obs: 当前历元所有可见卫星的数据列表
 //   time: 当前历元的时间信息
 //   out_pos: 输出参数，存放在此处 [x, y, z, dt]
-void pntpos(const vector<SatData>& obs, const EpochTime& time, vector<double>& out_pos) {
+SolveResult pntpos(const vector<SatData>& obs, const EpochTime& time) {
+    SolveResult res;
+    res.success = false;
     int n = obs.size();
     
     // 如果卫星数少于4颗，无法定位
     if (n < 4) {
-        return;
+        return res;
     }
 
     // ==========================================
@@ -63,12 +73,14 @@ void pntpos(const vector<SatData>& obs, const EpochTime& time, vector<double>& o
     const int maxIter = 10;
     const double eps = 1e-4;  //收敛阈值（m）
 
+    MatrixXd H(n, 4);  //设计矩阵n*4
+    VectorXd l(n);     //OMC观测值
+    MatrixXd W = MatrixXd::Zero(n, n);  //创建一个n*n的零矩阵
+
     for (int iter = 0; iter < maxIter; ++iter){
         //用Eigen来定义矩阵和向量
-        MatrixXd H(n, 4);  //设计矩阵n*4
-        VectorXd l(n);     //OMC观测值
-        MatrixXd W = MatrixXd::Zero(n, n);  //创建一个n*n的零矩阵
-
+        
+        
         //填充H,l,W，此时需要遍历所有星历才可以实现
         for (int i = 0; i < n;i++){
             double P_obs = obs[i].pseudorange;
@@ -105,19 +117,41 @@ void pntpos(const vector<SatData>& obs, const EpochTime& time, vector<double>& o
             break;
         }
     }
-        
-    // 模拟输出结果 (这只是为了演示，你需要算出真实值)
-    out_pos.resize(4);
-    out_pos[0] = Xr; // 用户 X
-    out_pos[1] = Yr; // 用户 Y
-    out_pos[2] = Zr; // 用户 Z
-    out_pos[3] = dt; // 钟差
+
+    //精度评定
+    VectorXd V(n);  //残差
+    for (int i = 0; i < n;i++){
+        double P_obs = obs[i].pseudorange;
+        double Xs = obs[i].sat_x;
+        double Ys = obs[i].sat_y;
+        double Zs = obs[i].sat_z;
+
+        double dist = sqrt((Xs - Xr) * (Xs - Xr) + (Ys - Yr) * (Ys - Yr) + (Zs - Zr) * (Zs - Zr));
+
+        double P_cal = dist + dt;
+        V(i) = P_cal - P_obs;
+    }
+    //计算验后单位权方差
+    double vtwv = V.transpose() * W * V;
+    double sigma0 = sqrt(vtwv / (n - 4));
+
+    //计算验后协方差矩阵
+    MatrixXd Qxx= (H.transpose() * W * H).inverse();
+
+    Matrix4d Dxx = Qxx * sigma0 * sigma0;
+
+    res.Parameter << Xr, Yr, Zr, dt;
+    res.sigma0 = sigma0;
+    res.cov = Dxx;
+    res.success = true;
+
+    return res;
 }
 
 int main() {
     // 原始文件路径 (使用了 R"()" 语法，不需要双斜杠)
     string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\CUSV_20212220_BDS_M0.5_I1.0_G2.0.txt)";
-    string outfile_path = "outpos_cpp.txt";
+    string outfile_path = "outpos_total.txt";
 
     ifstream infile(filename);
     ofstream outfile(outfile_path);
@@ -164,18 +198,54 @@ int main() {
             if (epoch_obs.size() >= 4) {
                 vector<double> result(4, 0.0); // 存放解 [x, y, z, dt]
                 
-                pntpos(epoch_obs, time_info, result);
+                SolveResult res = pntpos(epoch_obs, time_info);
 
-                // 输出格式: GPSWeek  GPSSec  UserX  UserY  UserZ dt
-                outfile << time_info.week << " "
-                        << time_info.tow << " "
-                        << setw(14) << result[0] << " "
-                        << setw(14) << result[1] << " "
-                        << setw(14) << result[2] << " "
-                        << setw(14) << result[3] << endl;
+                if (res.success) {
+                    // ==========================================
+                    //  按照图片格式输出
+                    // ==========================================
+                    
+                    // 第一行：历元编号 GPS周 周秒 观测值数
+                    outfile << "# " << left << setw(5) << time_info.epoch_num 
+                            << setw(8) << time_info.week 
+                            << setw(12) << fixed << setprecision(4) << time_info.tow 
+                            << num_sats << endl;
+
+                    // 第二行：表头
+                    outfile << left << setw(15) << "X (m)" 
+                            << setw(15) << "Y (m)" 
+                            << setw(15) << "Z (m)" 
+                            << "T(m)" << endl;
+
+                    // 第三行：解算数值
+                    outfile << left << fixed << setprecision(4) 
+                            << setw(15) << res.Parameter(0) 
+                            << setw(15) << res.Parameter(1) 
+                            << setw(15) << res.Parameter(2) 
+                            << res.Parameter(3) << endl;
+
+                    // 第四行：验后单位权中误差
+                    outfile << "验后单位权中误差: " << res.sigma0 << " (m)" << endl;
+
+                    // 第五行：验后估计方差标题
+                    outfile << "验后估计方差(m^2)" << endl;
+
+                    // 第六至九行：4x4 协方差矩阵
+                    for (int r = 0; r < 4; ++r) {
+                        outfile << left << fixed << setprecision(4)
+                                << setw(15) << res.cov(r, 0)
+                                << setw(15) << res.cov(r, 1)
+                                << setw(15) << res.cov(r, 2)
+                                << setw(15) << res.cov(r, 3) << endl;
+                    }
+
+                    // 分隔线
+                    outfile << "------------------------------------------------------------" << endl;
+                }
             }
         }
     }
+
 
     infile.close();
     outfile.close();
