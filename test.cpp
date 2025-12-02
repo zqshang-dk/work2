@@ -142,7 +142,151 @@ SolveResult pntpos(const vector<SatData>& obs, const EpochTime& time) {
     return res;
 }
 
+// ECEF → ENU 转换（输入坐标为 m）
+Vector3d ecef2enu(double X, double Y, double Z,
+                  double X0, double Y0, double Z0)
+{
+    // 计算参考点的经纬度
+    double dx = X - X0;
+    double dy = Y - Y0;
+    double dz = Z - Z0;
+
+    double lon = atan2(Y0, X0);
+    double p = sqrt(X0*X0 + Y0*Y0);
+    double lat = atan2(Z0, p);
+
+    // 构建旋转矩阵
+    Matrix3d R;
+    R << -sin(lon),              cos(lon),               0,
+         -sin(lat)*cos(lon), -sin(lat)*sin(lon),  cos(lat),
+          cos(lat)*cos(lon),  cos(lat)*sin(lon),  sin(lat);
+
+    Vector3d enu = R * Vector3d(dx, dy, dz);
+    return enu;
+}
+
+struct EvalResult {
+    double meanX, meanY, meanZ;
+    double stdX, stdY, stdZ;
+    double meanE, meanN, meanU;
+    double rmsE, rmsN, rmsU;
+};
+
+EvalResult evaluate(const vector<Vector4d>& allPos,
+                    double X0, double Y0, double Z0,
+                    const string& out_prefix)
+{
+    int m = allPos.size();
+    EvalResult R;
+
+    if(m==0){
+        cerr << "错误：没有可评估的数据" << endl;
+        return R;
+    }
+    // ================================
+    // 1) 计算 XYZ 均值
+    // ================================
+    double sumX = 0, sumY = 0, sumZ = 0;
+    for (size_t i = 0; i < m; i++) {
+        sumX += allPos[i](0);
+        sumY += allPos[i](1);
+        sumZ += allPos[i](2);
+    }
+    R.meanX = sumX / m;
+    R.meanY = sumY / m;
+    R.meanZ = sumZ / m;
+
+    // ================================
+    // 2) 样本标准差
+    // ================================
+    double sX=0, sY=0, sZ=0;
+    for (size_t i = 0; i < m; i++) {
+        sX += pow(allPos[i](0) - R.meanX, 2);
+        sY += pow(allPos[i](1) - R.meanY, 2);
+        sZ += pow(allPos[i](2) - R.meanZ, 2);
+    }
+    R.stdX = sqrt(sX/(m-1));
+    R.stdY = sqrt(sY/(m-1));
+    R.stdZ = sqrt(sZ/(m-1));
+
+    // ================================
+    // 3) 计算每个历元的 ENU
+    // ================================
+    vector<double> E, N, U;
+    E.reserve(m); N.reserve(m); U.reserve(m);
+
+    ofstream f_enu(out_prefix + "_ENU_series.txt");
+    if (!f_enu.is_open()) {
+        cerr << "错误：无法创建ENU输出文件" << endl;
+        return R;
+    }
+
+    f_enu << "Epoch   E(m)   N(m)   U(m)\n";
+
+    for (int i=0;i<m;i++){
+        Vector3d enu = ecef2enu(
+            allPos[i](0),
+            allPos[i](1),
+            allPos[i](2),
+            X0, Y0, Z0
+        );
+
+        E.push_back(enu(0));
+        N.push_back(enu(1));
+        U.push_back(enu(2));
+
+        f_enu << i+1 << " "
+              << enu(0) << " "
+              << enu(1) << " "
+              << enu(2) << "\n";
+    }
+    f_enu.close();
+
+    // ================================
+    // 4) ENU 均值 + RMS
+    // ================================
+    // auto mean = [&](vector<double>& v){
+    //     double s=0; for(double x:v) s+=x; return s/m;
+    // };
+    // auto rms = [&](vector<double>& v){
+    //     double s=0; for(double x:v) s+=x*x; return sqrt(s/m);
+    // };
+
+    // R.meanE = mean(E);
+    // R.meanN = mean(N);
+    // R.meanU = mean(U);
+
+    // R.rmsE = rms(E);
+    // R.rmsN = rms(N);
+    // R.rmsU = rms(U);
+    double sumE = 0, sumN = 0, sumU = 0;
+    for (int i = 0; i < m; i++) {
+        sumE += E[i];
+        sumN += N[i];
+        sumU += U[i];
+    }
+    R.meanE = sumE / m;
+    R.meanN = sumN / m;
+    R.meanU = sumU / m;
+    
+    // 计算RMS
+    double sumE2 = 0, sumN2 = 0, sumU2 = 0;
+    for (int i = 0; i < m; i++) {
+        sumE2 += E[i] * E[i];
+        sumN2 += N[i] * N[i];
+        sumU2 += U[i] * U[i];
+    }
+    R.rmsE = sqrt(sumE2 / m);
+    R.rmsN = sqrt(sumN2 / m);
+    R.rmsU = sqrt(sumU2 / m);
+
+    return R;
+}
+
+
 int main() {
+    vector<Vector4d> all_results;  // 存储每个历元的 X Y Z dt
+
     // 原始文件路径 (使用了 R"()" 语法，不需要双斜杠)
     string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\CUSV_20212220_BDS_M0.5_I1.0_G2.0.txt)";
     string outfile_path = "outpos_total.txt";
@@ -235,6 +379,9 @@ int main() {
 
                     // 分隔线
                     outfile << "------------------------------------------------------------" << endl;
+
+                    // 保存历元结果
+                    all_results.push_back(res.Parameter);
                 }
             }
         }
@@ -244,6 +391,30 @@ int main() {
     infile.close();
     outfile.close();
     cout << "处理完成，结果已保存至 " << outfile_path << endl;
+
+    // 如果收集到了结果，进行精度评估
+    if (!all_results.empty()) {
+        // 设置参考坐标（可以设为第一个历元的解或真实坐标）
+        double X0 = -1132914.6;  // 从你的第一个历元结果
+        double Y0 = 6092528.9;
+        double Z0 = 1504633.0;
+        
+        EvalResult eval = evaluate(all_results, X0, Y0, Z0, "result");
+        
+        // 输出评估结果
+        ofstream eval_file("accuracy_evaluation.txt");
+        eval_file << fixed << setprecision(4);
+        eval_file << "========== 精度评估结果 ==========\n";
+        eval_file << "位置均值: (" << eval.meanX << ", " << eval.meanY << ", " << eval.meanZ << ")\n";
+        eval_file << "位置标准差: (" << eval.stdX << ", " << eval.stdY << ", " << eval.stdZ << ")\n";
+        eval_file << "ENU均值: (" << eval.meanE << ", " << eval.meanN << ", " << eval.meanU << ")\n";
+        eval_file << "ENU RMS: (" << eval.rmsE << ", " << eval.rmsN << ", " << eval.rmsU << ")\n";
+        eval_file.close();
+        
+        cout << "精度评估结果已保存至 accuracy_evaluation.txt" << endl;
+    } else {
+        cout << "警告：没有成功解算的历元" << endl;
+    }
 
     return 0;
 }
