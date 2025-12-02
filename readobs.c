@@ -45,7 +45,7 @@ int main(int argc, char *argv[]) {
 	FILE *fp,*fop;
 	int i = 0, j,epochnum,gpsw,obsnum=0;
 	double obs[MAXOBS][4] = { 0 }, gpss, x[4] = { 0 };
-	char filename[MAXSTRPATH] = "E:/STUDY/Sophomore1/最优估计/第二次上机实习/work2/2059329.25ObsCorr";  /* 数据文件路径(绝对路径) */
+	char filename[MAXSTRPATH] = "E:/STUDY/Sophomore1/最优估计/第二次上机实习/work2/CUSV_20212220_BDS_M0.5_I1.0_G2.0.txt";  /* 数据文件路径(绝对路径) */
 	char outfile[MAXSTRPATH] = "outpos.txt"; /* 数据输出文件(与源码同路径)*/
 	char buff[MAXSTRPATH],satid[4];
 
