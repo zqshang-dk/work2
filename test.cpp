@@ -37,31 +37,25 @@ struct SolveResult{
     Matrix4d cov;   //验后参数协方差矩阵
     bool success;   //是否解算成功
 };
-// 你的定位解算函数接口
-// 参数：
-//   obs: 当前历元所有可见卫星的数据列表
-//   time: 当前历元的时间信息
-//   out_pos: 输出参数，存放在此处 [x, y, z, dt]
+
 SolveResult pntpos(const vector<SatData>& obs, const EpochTime& time) {
     SolveResult res;
     res.success = false;
-    int n = obs.size();
+
+    vector<SatData> cleaned_obs;
+    for (int i = 0; i < obs.size(); i++) {
+        if (obs[i].pseudorange > 10000.0) {  // 只保留伪距大于10000米的卫星
+            cleaned_obs.push_back(obs[i]);
+        }
+    }
+    //太悲伤了！！！！！因为没有进行数据清洗导致02和03的粗差没有消除！
+    
+    int n = cleaned_obs.size();
     
     // 如果卫星数少于4颗，无法定位
     if (n < 4) {
         return res;
     }
-
-    // ==========================================
-    //在此处编写最小二乘解算 (Least Squares)
-    // ==========================================
-    
-    // 提示：如何获取第 i 颗卫星的数据 (假设循环变量是 i)
-    // double P_obs = obs[i].pseudorange;  // 伪距观测值
-    // double Xs    = obs[i].sat_x;        // 卫星X坐标
-    // double Ys    = obs[i].sat_y;        // 卫星Y坐标
-    // double Zs    = obs[i].sat_z;        // 卫星Z坐标
-    // double Var   = obs[i].variance;     // 方差
 
     //数据初始化
     double Xr = 0;
@@ -83,11 +77,11 @@ SolveResult pntpos(const vector<SatData>& obs, const EpochTime& time) {
         
         //填充H,l,W，此时需要遍历所有星历才可以实现
         for (int i = 0; i < n;i++){
-            double P_obs = obs[i].pseudorange;
-            double Xs = obs[i].sat_x;
-            double Ys = obs[i].sat_y;
-            double Zs = obs[i].sat_z; 
-            double Var = obs[i].variance;
+            double P_obs = cleaned_obs[i].pseudorange;
+            double Xs = cleaned_obs[i].sat_x;
+            double Ys = cleaned_obs[i].sat_y;
+            double Zs = cleaned_obs[i].sat_z; 
+            double Var = cleaned_obs[i].variance;
 
             if(Var<=0)
                 Var = 1.0;
@@ -121,10 +115,10 @@ SolveResult pntpos(const vector<SatData>& obs, const EpochTime& time) {
     //精度评定
     VectorXd V(n);  //残差
     for (int i = 0; i < n;i++){
-        double P_obs = obs[i].pseudorange;
-        double Xs = obs[i].sat_x;
-        double Ys = obs[i].sat_y;
-        double Zs = obs[i].sat_z;
+        double P_obs = cleaned_obs[i].pseudorange;
+        double Xs = cleaned_obs[i].sat_x;
+        double Ys = cleaned_obs[i].sat_y;
+        double Zs = cleaned_obs[i].sat_z;
 
         double dist = sqrt((Xs - Xr) * (Xs - Xr) + (Ys - Yr) * (Ys - Yr) + (Zs - Zr) * (Zs - Zr));
 
