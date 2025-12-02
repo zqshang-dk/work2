@@ -9,6 +9,9 @@
 using namespace std;
 using namespace Eigen;
 
+//光速（m/s）
+const double C_LIGHT = 299792458.0; 
+
 // 定义一个结构体用来存储单颗卫星的观测数据
 struct SatData {
     string id;      // 卫星ID (例如 C01)
@@ -49,33 +52,103 @@ void pntpos(const vector<SatData>& obs, const EpochTime& time, vector<double>& o
     // double Ys    = obs[i].sat_y;        // 卫星Y坐标
     // double Zs    = obs[i].sat_z;        // 卫星Z坐标
     // double Var   = obs[i].variance;     // 方差
-    for (int i = 0; i < n;i++){
-        double P_obs = obs[i].pseudorange;
-        double Xs = obs[i].sat_x;
-        double Ys = obs[i].sat_y;
-        double Zs    = obs[i].sat_z;        // 卫星Z坐标
-        double Var   = obs[i].variance;
 
-        double Xr = 0;
-        double Yr = 0;
-        double Zr = 0;
-        double dt = 0;
-        
-        double P0 = sqrt((Xs - Xr) * (Xs - Xr) + (Ys - Yr) * (Ys - Yr) + (Zs - Zr) * (Zs - Zr));
+    //数据初始化
+    double Xr = 0;
+    double Yr = 0;
+    double Zr = 0;
+    double dt = 0;
 
-       
-        //设计矩阵
-        // double H[25][4] = [((Xr - Xs) / P0, (Yr - Ys) / P0, (Zr - Zs) / P0, 1),];
-        double H[n][4];
-        H(i,0)=
+    //迭代参数
+    const int maxIter = 10;
+    const double eps = 1e-4;  //收敛阈值（m）
+
+    for (int iter = 0; iter < maxIter; ++iter)
+    {
+        // double H[n][4];
+        //     H(i, 0) = (Xr - Xs) / P0;
+        //     H(i, 1) = (Yr - Ys) / P0;
+        //     H(i, 2) = (Zr - Zs) / P0;
+        //     H(i, 3) = 1;
+
+        //用Eigen来定义矩阵和向量
+        MatrixXd H(n, 4);  //设计矩阵n*4
+        VectorXd l(n);     //OMC观测值
+        MatrixXd W = MatrixXd::Zero(n, n);  //创建一个n*n的零矩阵
+
+        //填充H,l,W，此时需要遍历所有星历才可以实现
+        for (int i = 0; i < n;i++){
+            double P_obs = obs[i].pseudorange;
+            double Xs = obs[i].sat_x;
+            double Ys = obs[i].sat_y;
+            double Zs = obs[i].sat_z; 
+            double Var = obs[i].variance;
+
+            if(Var<=0)
+                Var = 1.0;
+            
+            double P0 = sqrt((Xs - Xr) * (Xs - Xr) + (Ys - Yr) * (Ys - Yr) + (Zs - Zr) * (Zs - Zr));
+            
+            H(i, 0) = (Xr - Xs) / P0;
+            H(i, 1) = (Yr - Ys) / P0;
+            H(i, 2) = (Zr - Zs) / P0;
+            H(i, 3) = 1.0;
+
+            //OMC残差
+            l(i) = P_obs - (P0 + dt);
+
+            //构造权矩阵
+            W(i, i) = 1.0 / Var;
+        }
+        VectorXd dx = (H.transpose() * W * H).ldlt() .solve (H.transpose() * W * l);
+
+        Xr += dx(0);
+        Yr += dx(1);
+        Zr += dx(2);
+        dt += dx(3);
+
+        double pos_delta = sqrt(dx(0) * dx(0) + dx(1) * dx(1) + dx(2) * dx(2));
+        if(pos_delta<eps){
+            break;
+        }
     }
+
+
+        // for (int i = 0; i < n; i++)
+        // {
+            
+
+            
+        //     // 设计矩阵
+        //     //  double H[25][4] = [((Xr - Xs) / P0, (Yr - Ys) / P0, (Zr - Zs) / P0, 1),];
+            
+
+        //     // OMC观测值计算
+        //     double l[i] = P_obs - (P0 + c * dt);
+
+        //     // 构造权矩阵
+        //     double W[n][n];
+        //     W[i][i] = 1.0 / var;
+
+        //     double dx[4] = (H.transpose() * W * H).inverse() * (H.tranpose() * W * l[i]);
+        //     Xr += dx(0);
+        //     Yr += dx(1);
+        //     Zr += dx(2);
+        //     dt += dx(3);
+
+        //     if (dx.norm() < 1e-4)
+        //     {
+        //         break;
+        //     }
+        // }
         
 
     // 模拟输出结果 (这只是为了演示，你需要算出真实值)
-    out_pos[0] = 0.0; // 用户 X
-    out_pos[1] = 0.0; // 用户 Y
-    out_pos[2] = 0.0; // 用户 Z
-    out_pos[3] = 0.0; // 钟差
+    out_pos.resize(4);
+    out_pos[0] = Xr; // 用户 X
+    out_pos[1] = Yr; // 用户 Y
+    out_pos[2] = Zr; // 用户 Z
+    out_pos[3] = dt; // 钟差
 }
 
 int main() {
