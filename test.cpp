@@ -395,9 +395,9 @@ int main() {
     // 如果收集到了结果，进行精度评估
     if (!all_results.empty()) {
         // 设置参考坐标（可以设为第一个历元的解或真实坐标）
-        double X0 = -1132914.6;  // 从你的第一个历元结果
-        double Y0 = 6092528.9;
-        double Z0 = 1504633.0;
+        double X0 = -1132914.6126;  // 从你的第一个历元结果
+        double Y0 = 6092528.9442;
+        double Z0 = 1504633.0098;
         
         EvalResult eval = evaluate(all_results, X0, Y0, Z0, "result");
         
