@@ -1,4 +1,3 @@
-// 修改后的完整程序（在你的基础上做了最小侵入的改动并添加了系统分组、PRN记录、ECEF->BLH 转换以及输出）
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -6,25 +5,20 @@
 #include <sstream>
 #include <iomanip>
 #include <cmath>
-#include <map>
 #include <Eigen/Dense>
 
 using namespace std;
 using namespace Eigen;
 
-// 光速（m/s）
-const double C_LIGHT = 299792458.0; 
-
-// WGS84 常数（用于 ECEF->BLH）
-const double WGS84_A = 6378137.0;
-const double WGS84_F = 1.0 / 298.257223563;
-const double WGS84_E2 = 2 * WGS84_F - WGS84_F * WGS84_F; // e^2
+//光速（m/s）
+const double C_LIGHT = 299792458.0;
+const double A = 6378137.0;
+const double F = 1.0 / 298.257223563;
+const double E2 = 2 * F - F * F;
 
 // 定义一个结构体用来存储单颗卫星的观测数据
 struct SatData {
-    string id_raw;  // 原始ID，如 "G01"
-    char sys;       // 卫星系统字符 'G','C','R','E',...
-    string prn;     // PRN号字符串，例如 "01","10"（便于记录）
+    string id;      // 卫星ID (例如 C01)
     double sat_x;        // 卫星 X 坐标 (m)
     double sat_y;        // 卫星 Y 坐标 (m)
     double sat_z;        // 卫星 Z 坐标 (m)
@@ -41,170 +35,195 @@ struct EpochTime {
 
 //定义解算结果结构体
 struct SolveResult{
-    Vector4d Parameter; // X,Y,Z,dt
+    VectorXd Parameter;
     double sigma0;  //验后单位权中误差
     Matrix4d cov;   //验后参数协方差矩阵
     bool success;   //是否解算成功
 };
 
-// pntpos 函数：不变（只是去掉了不合适的伪距阈值过滤，使用传入观测直接解）
-// 说明：保留你原来的加权最小二乘实现，但不再在函数内随意丢弃伪距<10000的卫星。
-//       如果你希望在这里做粗差剔除，请在调用前对 epoch_obs 做检测/剔除。
-SolveResult pntpos(const vector<SatData>& obs, const EpochTime& time) {
+// ECEF → BLH 转换函数（高精度迭代法）
+void ecef2blh(double X, double Y, double Z, double& B, double& L, double& H) {
+    double p = sqrt(X*X + Y*Y);
+    L = atan2(Y, X);                    // 经度（rad）
+    double B0 = atan2(Z, p * (1 - E2)); // 初始纬度
+    double B_prev;
+    double N;
+    do {
+        B_prev = B0;
+        N = A / sqrt(1 - E2 * sin(B0)*sin(B0));
+        H = p / cos(B0) - N;
+        B0 = atan2(Z, p * (1 - E2 * N / (N + H)));
+    } while (fabs(B0 - B_prev) > 1e-12);
+
+    B = B0;
+    N = A / sqrt(1 - E2 * sin(B)*sin(B));
+    H = p / cos(B) - N;
+
+    B = B * 180.0 / M_PI;   // 转为度
+    L = L * 180.0 / M_PI;
+}
+
+SolveResult pntpos_multi(const vector<SatData>& obs) {
     SolveResult res;
     res.success = false;
-
+    res.Parameter = VectorXd::Zero(7);          //// X,Y,Z, dtG, dtC, dtE, dtR
     vector<SatData> cleaned_obs;
     for (int i = 0; i < obs.size(); i++) {
-        if (obs[i].pseudorange > 10000.0) {  // 只保留伪距大于10000米的卫星
+        if (obs[i].pseudorange > 10000.0 && obs[i].variance>0) {  // 只保留伪距大于10000米的卫星
             cleaned_obs.push_back(obs[i]);
         }
     }
-
+    //太悲伤了！！！！！因为没有进行数据清洗导致02和03的粗差没有消除！
+    
     int n = cleaned_obs.size();
+    
     // 如果卫星数少于4颗，无法定位
     if (n < 4) {
         return res;
     }
 
-    //数据初始化（可改为更好的初值，如地心或上次解）
-    double Xr = 0;
-    double Yr = 0;
-    double Zr = 0;
-    double dt = 0;
+    VectorXd x = VectorXd::Zero(7);
+    x.head<3>() = Vector3d(0, 0, 0);
 
-    //迭代参数
-    const int maxIter = 10;
-    const double eps = 1e-4;  //收敛阈值（m）
-
-    MatrixXd H(n, 4);  //设计矩阵n*4
+    MatrixXd H(n, 7);  //设计矩阵
     VectorXd l(n);     //OMC观测值
     MatrixXd W = MatrixXd::Zero(n, n);  //创建一个n*n的零矩阵
+    //迭代参数
+    const int maxIter = 15;
+    const double eps = 1e-4;  //收敛阈值（m）
+    //数据初始化
+    // double Xr = 0;
+    // double Yr = 0;
+    // double Zr = 0;
+    // double dt = 0;
 
     for (int iter = 0; iter < maxIter; ++iter){
-        // 填充 H, l, W
-        for (int i = 0; i < n; i++){
+        //用Eigen来定义矩阵和向量    
+        H.setZero();
+        l.setZero();
+        W.setZero();
+        //填充H,l,W，此时需要遍历所有星历才可以实现
+        for (int i = 0; i < n;i++){
             double P_obs = cleaned_obs[i].pseudorange;
             double Xs = cleaned_obs[i].sat_x;
             double Ys = cleaned_obs[i].sat_y;
             double Zs = cleaned_obs[i].sat_z; 
             double Var = cleaned_obs[i].variance;
+            double P0 = sqrt((Xs - x(0)) * (Xs - x(0)) + (Ys - x(1)) * (Ys - x(1)) + (Zs - x(2)) * (Zs - x(2)));
+            if(Var<=0)
+                Var = 1.0;
+            
+            H.row(i).setZero();
+            
+            H(i, 0) = (x(0) - Xs) / P0;
+            H(i, 1) = (x(1) - Ys) / P0;
+            H(i, 2) = (x(2) - Zs) / P0;
+            // H(i, 3) = 1.0;
 
-            if(Var <= 0) Var = 1.0;
+            //OMC残差
+            // l(i) = P_obs - (P0 + dt);
 
-            double P0 = sqrt((Xs - Xr) * (Xs - Xr) + (Ys - Yr) * (Ys - Yr) + (Zs - Zr) * (Zs - Zr));
-            if (P0 < 1.0) P0 = 1.0; // 防止除0
+            //钟差列：根据系统设置1
+            char sys = cleaned_obs[i].id[0];
+            if(sys=='G')
+                H(i, 3) = 1.0;
+            else if(sys=='C')
+                H(i, 4) = 1.0;
+            else if(sys=='E')
+                H(i, 5) = 1.0;
+            else if(sys=='R')
+                H(i, 6) = 1.0;
+            else
+                H(i, 3) = 1.0;  //如果没写的话默认是GPS卫星
+            
+            //观测方程中钟差的设置
+            double dt_sys = 0.0;
+            if (sys == 'G')
+                dt_sys = x(3);
+            else if (sys == 'C')
+                dt_sys = x(4);
+            else if (sys == 'E')
+                dt_sys = x(5);
+            else if (sys == 'R')
+                dt_sys = x(6);
 
-            H(i, 0) = (Xr - Xs) / P0;
-            H(i, 1) = (Yr - Ys) / P0;
-            H(i, 2) = (Zr - Zs) / P0;
-            H(i, 3) = 1.0;
+            //OMC残差
+            l(i) = P_obs - (P0 + dt_sys);
 
-            // OMC 残差 (观测 - 计算)
-            l(i) = P_obs - (P0 + dt);
-
-            // 权矩阵（用方差的倒数）
+            //构造权矩阵
             W(i, i) = 1.0 / Var;
         }
+        VectorXd dx = (H.transpose() * W * H).ldlt() .solve (H.transpose() * W * l);
 
-        // 法方程求解 dx——修改原因：当法矩阵奇异是，ldlt会导致数值爆炸，用更稳健的方式
-        //VectorXd dx = (H.transpose() * W * H).ldlt().solve(H.transpose() * W * l);
-        VectorXd dx = (H.transpose() * W * H + 1e-6 * Matrix4d::Identity()).ldlt().solve(H.transpose() * W * l);
-
-        if (dx.size() != 4) break;
-        Xr += dx(0);
-        Yr += dx(1);
-        Zr += dx(2);
-        dt += dx(3);
+        // Xr += dx(0);
+        // Yr += dx(1);
+        // Zr += dx(2);
+        // dt += dx(3);
+        x += dx;
 
         double pos_delta = sqrt(dx(0) * dx(0) + dx(1) * dx(1) + dx(2) * dx(2));
-        if (pos_delta < eps) break;
+        if(pos_delta<eps){
+            break;
+        }
     }
 
-    // 计算残差并评定精度
-    VectorXd V(n);
-    for (int i = 0; i < n; i++){
+    //精度评定
+    VectorXd V(n);  //残差
+    for (int i = 0; i < n;i++){
         double P_obs = cleaned_obs[i].pseudorange;
         double Xs = cleaned_obs[i].sat_x;
         double Ys = cleaned_obs[i].sat_y;
         double Zs = cleaned_obs[i].sat_z;
+        char sys = cleaned_obs[i].id[0];
+        double dt_sys = (sys=='G'?x(3):(sys=='C'?x(4):(sys=='E'?x(5):x(6))));
+        double dist = sqrt((Xs - x(0)) * (Xs - x(0)) + (Ys - x(1)) * (Ys - x(1)) + (Zs - x(2)) * (Zs - x(2)));
 
-        double dist = sqrt((Xs - Xr) * (Xs - Xr) + (Ys - Yr) * (Ys - Yr) + (Zs - Zr) * (Zs - Zr));
-        double P_cal = dist + dt;
+        double P_cal = dist + dt_sys;
         V(i) = P_cal - P_obs;
     }
-    // 验后单位权方差
+    //计算验后单位权方差
     double vtwv = V.transpose() * W * V;
-    double sigma0 = 0.0;
-    if (n - 4 > 0)
-        sigma0 = sqrt(vtwv / (n - 4));
-    else
-        sigma0 = 0.0;
+    double sigma0 = sqrt(vtwv / (n - 7));
 
-    // 验后协方差矩阵
-    MatrixXd Qxx = (H.transpose() * W * H).inverse();
-    Matrix4d Dxx = Qxx * sigma0 * sigma0;
+    // //计算验后协方差矩阵
+    // MatrixXd Qxx= (H.transpose() * W * H).inverse();
 
-    res.Parameter << Xr, Yr, Zr, dt;
+    // Matrix4d Dxx = Qxx * sigma0 * sigma0;
+
+    //res.Parameter << x(0), x(1), x(2), dt;
+    // res.Parameter.head<3>() = x.head<3>();
+    // res.Parameter.tail<4>() = x.tail<4>();
+    res.Parameter = x;
     res.sigma0 = sigma0;
-    res.cov = Dxx;
+    //res.cov = Dxx;
     res.success = true;
+
     return res;
 }
 
-// ECEF → ENU 转换（输入坐标为 m） - 保留你原来的实现
-Vector3d ecef2enu(double X, double Y, double Z,
-                  double X0, double Y0, double Z0)
-{
-    double dx = X - X0;
-    double dy = Y - Y0;
-    double dz = Z - Z0;
+// // ECEF → ENU 转换（输入坐标为 m）
+// Vector3d ecef2enu(double X, double Y, double Z,
+//                   double X0, double Y0, double Z0)
+// {
+//     // 计算参考点的经纬度
+//     double dx = X - X0;
+//     double dy = Y - Y0;
+//     double dz = Z - Z0;
 
-    double lon = atan2(Y0, X0);
-    double p = sqrt(X0*X0 + Y0*Y0);
-    double lat = atan2(Z0, p);
+//     double lon = atan2(Y0, X0);
+//     double p = sqrt(X0*X0 + Y0*Y0);
+//     double lat = atan2(Z0, p);
 
-    Matrix3d R;
-    R << -sin(lon),              cos(lon),               0,
-         -sin(lat)*cos(lon), -sin(lat)*sin(lon),  cos(lat),
-          cos(lat)*cos(lon),  cos(lat)*sin(lon),  sin(lat);
+//     // 构建旋转矩阵
+//     Matrix3d R;
+//     R << -sin(lon),              cos(lon),               0,
+//          -sin(lat)*cos(lon), -sin(lat)*sin(lon),  cos(lat),
+//           cos(lat)*cos(lon),  cos(lat)*sin(lon),  sin(lat);
 
-    Vector3d enu = R * Vector3d(dx, dy, dz);
-    return enu;
-}
+//     Vector3d enu = R * Vector3d(dx, dy, dz);
+//     return enu;
+// }
 
-// ECEF -> BLH (经度、纬度以度为单位，height为米)
-// 使用迭代法（Bowring-like）求解精度良好
-void ecef2blh(double X, double Y, double Z, double &lat_deg, double &lon_deg, double &h) {
-    double a = WGS84_A;
-    double e2 = WGS84_E2;
-
-    double lon = atan2(Y, X);
-
-    double p = sqrt(X*X + Y*Y);
-    double lat = atan2(Z, p * (1 - e2)); // 初值
-
-    double lat_prev = 0;
-    int iter = 0;
-    while (fabs(lat - lat_prev) > 1e-12 && iter < 20) {
-        lat_prev = lat;
-        double sinlat = sin(lat);
-        double N = a / sqrt(1.0 - e2 * sinlat * sinlat);
-        h = p / cos(lat) - N;
-        lat = atan2(Z, p * (1.0 - e2 * (N / (N + h))));
-        iter++;
-    }
-
-    // 最终高度
-    double sinlat = sin(lat);
-    double N = a / sqrt(1.0 - e2 * sinlat * sinlat);
-    h = p / cos(lat) - N;
-
-    lat_deg = lat * 180.0 / M_PI;
-    lon_deg = lon * 180.0 / M_PI;
-}
-
-// 评估结构体保持不变
 struct EvalResult {
     double meanX, meanY, meanZ;
     double stdX, stdY, stdZ;
@@ -212,17 +231,20 @@ struct EvalResult {
     double rmsE, rmsN, rmsU;
 };
 
-// evaluate 函数保持（微调：可以复用你原实现）
-EvalResult evaluate(const vector<Vector4d>& allPos,
+EvalResult evaluate(const vector<VectorXd>& allPos,
                     double X0, double Y0, double Z0,
                     const string& out_prefix)
 {
     int m = allPos.size();
     EvalResult R;
-    if(m == 0){
+
+    if(m==0){
         cerr << "错误：没有可评估的数据" << endl;
         return R;
     }
+    // ================================
+    // 1) 计算 XYZ 均值
+    // ================================
     double sumX = 0, sumY = 0, sumZ = 0;
     for (size_t i = 0; i < m; i++) {
         sumX += allPos[i](0);
@@ -233,6 +255,9 @@ EvalResult evaluate(const vector<Vector4d>& allPos,
     R.meanY = sumY / m;
     R.meanZ = sumZ / m;
 
+    // ================================
+    // 2) 样本标准差
+    // ================================
     double sX=0, sY=0, sZ=0;
     for (size_t i = 0; i < m; i++) {
         sX += pow(allPos[i](0) - R.meanX, 2);
@@ -243,240 +268,254 @@ EvalResult evaluate(const vector<Vector4d>& allPos,
     R.stdY = sqrt(sY/(m-1));
     R.stdZ = sqrt(sZ/(m-1));
 
-    vector<double> E, N, U;
-    E.reserve(m); N.reserve(m); U.reserve(m);
+    // // ================================
+    // // 3) 计算每个历元的 ENU
+    // // ================================
+    // vector<double> E, N, U;
+    // E.reserve(m); N.reserve(m); U.reserve(m);
 
-    ofstream f_enu(out_prefix + "_ENU_series.txt");
-    if (!f_enu.is_open()) {
-        cerr << "错误：无法创建ENU输出文件" << endl;
-        return R;
-    }
-    f_enu << "Epoch   E(m)   N(m)   U(m)\n";
+    // ofstream f_enu(out_prefix + "_ENU_series.txt");
+    // if (!f_enu.is_open()) {
+    //     cerr << "错误：无法创建ENU输出文件" << endl;
+    //     return R;
+    // }
 
-    for (int i=0;i<m;i++){
-        Vector3d enu = ecef2enu(
-            allPos[i](0),
-            allPos[i](1),
-            allPos[i](2),
-            X0, Y0, Z0
-        );
-        E.push_back(enu(0));
-        N.push_back(enu(1));
-        U.push_back(enu(2));
-        f_enu << i+1 << " "
-              << enu(0) << " "
-              << enu(1) << " "
-              << enu(2) << "\n";
-    }
-    f_enu.close();
+    // f_enu << "Epoch   E(m)   N(m)   U(m)\n";
 
-    double sumE = 0, sumN = 0, sumU = 0;
-    for (int i = 0; i < m; i++) {
-        sumE += E[i];
-        sumN += N[i];
-        sumU += U[i];
-    }
-    R.meanE = sumE / m;
-    R.meanN = sumN / m;
-    R.meanU = sumU / m;
+    // for (int i=0;i<m;i++){
+    //     Vector3d enu = ecef2enu(
+    //         allPos[i](0),
+    //         allPos[i](1),
+    //         allPos[i](2),
+    //         X0, Y0, Z0
+    //     );
 
-    double sumE2 = 0, sumN2 = 0, sumU2 = 0;
-    for (int i = 0; i < m; i++) {
-        sumE2 += E[i] * E[i];
-        sumN2 += N[i] * N[i];
-        sumU2 += U[i] * U[i];
-    }
-    R.rmsE = sqrt(sumE2 / m);
-    R.rmsN = sqrt(sumN2 / m);
-    R.rmsU = sqrt(sumU2 / m);
+    //     E.push_back(enu(0));
+    //     N.push_back(enu(1));
+    //     U.push_back(enu(2));
 
-    return R;
+    //     f_enu << i+1 << " "
+    //           << enu(0) << " "
+    //           << enu(1) << " "
+    //           << enu(2) << "\n";
+    // }
+    // f_enu.close();
+
+    // ================================
+    // 4) ENU 均值 + RMS
+    // ================================
+    // auto mean = [&](vector<double>& v){
+    //     double s=0; for(double x:v) s+=x; return s/m;
+    // };
+    // auto rms = [&](vector<double>& v){
+    //     double s=0; for(double x:v) s+=x*x; return sqrt(s/m);
+    // };
+
+    // R.meanE = mean(E);
+    // R.meanN = mean(N);
+    // R.meanU = mean(U);
+
+    // R.rmsE = rms(E);
+    // R.rmsN = rms(N);
+    // R.rmsU = rms(U);
+    // double sumE = 0, sumN = 0, sumU = 0;
+    // for (int i = 0; i < m; i++) {
+    //     sumE += E[i];
+    //     sumN += N[i];
+    //     sumU += U[i];
+    // }
+    // R.meanE = sumE / m;
+    // R.meanN = sumN / m;
+    // R.meanU = sumU / m;
+    
+    // // 计算RMS
+    // double sumE2 = 0, sumN2 = 0, sumU2 = 0;
+    // for (int i = 0; i < m; i++) {
+    //     sumE2 += E[i] * E[i];
+    //     sumN2 += N[i] * N[i];
+    //     sumU2 += U[i] * U[i];
+    // }
+    // R.rmsE = sqrt(sumE2 / m);
+    // R.rmsN = sqrt(sumN2 / m);
+    // R.rmsU = sqrt(sumU2 / m);
+
+    // return R;
 }
 
+
 int main() {
-    vector<Vector4d> all_results;  // 存储每个历元的 X Y Z dt（平均后的）
-    string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\mydata\2059329.25ObsCorr)";
+    vector<VectorXd> all_results;  // 存储每个历元的 X Y Z dt
+
+    // 原始文件路径 (使用了 R"()" 语法，不需要双斜杠)
+    string filename = R"(E:\STUDY\Sophomore1\最优估计\第二次上机实习\work2\CUSV_20212220_BDS_M0.5_I1.0_G2.0.txt)";
     string outfile_path = "outpos_total.txt";
-    string outblh_path = "outpos_blh.txt";
+
     ifstream infile(filename);
     ofstream outfile(outfile_path);
-    ofstream outblh(outblh_path);
 
     if (!infile.is_open()) {
         cerr << "错误：无法打开文件 " << filename << endl;
         return -1;
     }
-    if (!outfile.is_open()) {
-        cerr << "错误：无法创建 " << outfile_path << endl;
-        return -1;
-    }
-    if (!outblh.is_open()) {
-        cerr << "错误：无法创建 " << outblh_path << endl;
-        return -1;
-    }
 
-    // 输出表头
-    outfile << fixed << setprecision(4);
-    outblh << fixed << setprecision(8);
-    outfile << "# 格式: 历元头, 然后每个系统的解 (如果可解), 最后 AverageXYZ\n";
-    outblh << "# 格式: Epoch Week TOW avg_lat(deg) avg_lon(deg) avg_h(m)\n";
+    // 设置输出精度为小数点后3位
+    outfile << fixed << setprecision(3);
 
     string line;
     while (getline(infile, line)) {
+        // 跳过空行
         if (line.empty()) continue;
 
+        // 检查是否是历元头 (以 '#' 开头)
         if (line[0] == '#') {
             EpochTime time_info;
             int num_sats = 0;
-            char hash_char;
+            char hash_char; 
+
+            // 解析头文件: "#  1 2170 172800.000 25"
             stringstream ss_header(line);
             ss_header >> hash_char >> time_info.epoch_num >> time_info.week >> time_info.tow >> num_sats;
 
+            // 读取该历元下的所有卫星数据
             vector<SatData> epoch_obs;
-            epoch_obs.reserve(num_sats);
+            epoch_obs.reserve(num_sats); 
 
             for (int i = 0; i < num_sats; ++i) {
                 if (!getline(infile, line)) break;
-                if (line.empty()) { i--; continue; } // 避免空行计数错误
-
+                
                 stringstream ss_obs(line);
                 SatData sat;
-                // 解析：ID X Y Z Pseudo Variance
-                ss_obs >> sat.id_raw >> sat.sat_x >> sat.sat_y >> sat.sat_z >> sat.pseudorange >> sat.variance;
-
-                // 解析 sys 与 prn
-                if (!sat.id_raw.empty()) {
-                    sat.sys = sat.id_raw[0];
-                    if (sat.id_raw.size() > 1)
-                        sat.prn = sat.id_raw.substr(1);
-                    else sat.prn = "";
-                } else {
-                    sat.sys = '?';
-                    sat.prn = "";
-                }
+                // 解析每行卫星数据
+                ss_obs >> sat.id >> sat.sat_x >> sat.sat_y >> sat.sat_z >> sat.pseudorange >> sat.variance;
+                
                 epoch_obs.push_back(sat);
             }
 
-            // ------------------------------------------
-            // 分系统（按 sat.sys）解算（每个系统一个独立观测集）
-            // ------------------------------------------
-            map<char, vector<SatData>> sys_groups;
-            for (const auto &s : epoch_obs) {
-                sys_groups[s.sys].push_back(s);
-            }
+            // 进行定位解算
+            if (epoch_obs.size() >= 4) {
+                vector<double> result(4, 0.0); // 存放解 [x, y, z, dt]
+                
+                SolveResult res = pntpos_multi(epoch_obs);
 
-            // 保存每个系统的解
-            map<char, SolveResult> sys_results;
-            for (auto &kv : sys_groups) {
-                char sysc = kv.first;
-                vector<SatData> &obs_sys = kv.second;
+                vector<VectorXd> all_positions;
 
-                // 只解算卫星数>=4 的系统
-                if ((int)obs_sys.size() >= 4) {
-                    SolveResult r = pntpos(obs_sys, time_info);
-                    if (r.success) {
-                        sys_results[sysc] = r;
-                    }
+                if (res.success) {
+                    all_results.push_back(res.Parameter);
+
+                    double X = res.Parameter(0);
+                    double Y = res.Parameter(1);
+                    double Z = res.Parameter(2);
+                    double Lat, Lon, H;
+                    ecef2blh(X, Y, Z, Lat, Lon, H);
+
+                    // outfile << "# " << time_info.epoch_num << " "
+                    //         << time_info.week << " " << fixed << setprecision(3) << time_info.tow << " "
+                    //         << epoch_obs.size() << " sats" << endl;
+
+                    // outfile << fixed << setprecision(4);
+                    // outfile << "X: " << setw(15) << X
+                    //         << " Y: " << setw(15) << Y
+                    //         << " Z: " << setw(15) << Z << endl;
+
+                    // outfile << "Lat: " << setw(12) << setprecision(8) << Lat << " deg"
+                    //         << " Lon: " << setw(12) << Lon << " deg"
+                    //         << " H: " << setw(10) << setprecision(3) << H << " m"
+                    //         << "  sigma0: " << res.sigma0 << " m" << endl;
+
+                    // outfile << "dt_GPS: " << setw(10) << setprecision(3) << res.Parameter(3)
+                    //         << " dt_BDS: " << res.Parameter(4)
+                    //         << " dt_GAL: " << res.Parameter(5)
+                    //         << " dt_GLO: " << res.Parameter(6) << " m" << endl;
+                    // ===== 输出头部 =====
+                    outfile << "# " << setw(4) << time_info.epoch_num
+                            << setw(8) << time_info.week
+                            << setw(14) << fixed << setprecision(4) << time_info.tow
+                            << setw(4) << epoch_obs.size() << "\n";
+
+                    // ===== 输出标题行 =====
+                    outfile << "X (m)          Y (m)          Z (m)          "
+                            << "dT_GPS(m)      dT_BDS(m)      dT_GAL(m)      dT_GLO(m)\n";
+
+                    // ===== 输出数据行 =====
+                    outfile << fixed << setprecision(4)
+                            << setw(15) << X
+                            << setw(15) << Y
+                            << setw(15) << Z
+                            << setw(15) << res.Parameter(3)   // dT_GPS
+                            << setw(15) << res.Parameter(4)   // dT_BDS
+                            << setw(15) << res.Parameter(5)   // dT_GAL
+                            << setw(15) << res.Parameter(6)   // dT_GLO
+                            << "\n\n";
+
+                    outfile << "------------------------------------------------------------" << endl;
+                    // // 第一行：历元编号 GPS周 周秒 观测值数
+                    // outfile << "# " << left << setw(5) << time_info.epoch_num 
+                    //         << setw(8) << time_info.week 
+                    //         << setw(12) << fixed << setprecision(4) << time_info.tow 
+                    //         << num_sats << endl;
+
+                    // // 第二行：表头
+                    // outfile << left << setw(15) << "X (m)" 
+                    //         << setw(15) << "Y (m)" 
+                    //         << setw(15) << "Z (m)" 
+                    //         << "T(m)" << endl;
+
+                    // // 第三行：解算数值
+                    // outfile << left << fixed << setprecision(4) 
+                    //         << setw(15) << res.Parameter(0) 
+                    //         << setw(15) << res.Parameter(1) 
+                    //         << setw(15) << res.Parameter(2) 
+                    //         << res.Parameter(3) << endl;
+
+                    // // 第四行：验后单位权中误差
+                    // outfile << "验后单位权中误差: " << res.sigma0 << " (m)" << endl;
+
+                    // // 第五行：验后估计方差标题
+                    // outfile << "验后估计方差(m^2)" << endl;
+
+                    // // 第六至九行：4x4 协方差矩阵
+                    // for (int r = 0; r < 4; ++r) {
+                    //     outfile << left << fixed << setprecision(4)
+                    //             << setw(15) << res.cov(r, 0)
+                    //             << setw(15) << res.cov(r, 1)
+                    //             << setw(15) << res.cov(r, 2)
+                    //             << setw(15) << res.cov(r, 3) << endl;
+                    // }
+
+                    // // 分隔线
+                    // outfile << "------------------------------------------------------------" << endl;
+
+                    // 保存历元结果
+                    all_results.push_back(res.Parameter);
                 }
-            }
-
-            // 将每个系统的解写入 outfile
-            outfile << "# " << left << setw(5) << time_info.epoch_num
-                    << setw(8) << time_info.week
-                    << setw(12) << fixed << setprecision(4) << time_info.tow
-                    << setw(6) << num_sats << "\n";
-
-            // 写系统表头
-            outfile << left << setw(6) << "SYS"
-                    << setw(15) << "X(m)"
-                    << setw(15) << "Y(m)"
-                    << setw(15) << "Z(m)"
-                    << setw(12) << "T(m)"
-                    << setw(12) << "sigma0" << "\n";
-
-            // 写出每个系统的解
-            for (auto &kv : sys_results) {
-                char sysc = kv.first;
-                SolveResult &r = kv.second;
-                outfile << left << setw(6) << string(1, sysc)
-                        << setw(15) << r.Parameter(0)
-                        << setw(15) << r.Parameter(1)
-                        << setw(15) << r.Parameter(2)
-                        << setw(12) << r.Parameter(3)
-                        << setw(12) << r.sigma0 << "\n";
-            }
-
-            // 计算可用系统的平均 XYZ（只对 X,Y,Z 做平均）
-            Vector3d sumXYZ(0,0,0);
-            int cnt = 0;
-            for (auto &kv: sys_results) {
-                Vector4d p = kv.second.Parameter;
-                sumXYZ += Vector3d(p(0), p(1), p(2));
-                cnt++;
-            }
-            // Vector3d weighted_sum(0,0,0);
-            // double total_weight = 0;
-            // for (auto &kv : sys_results) {
-            //     double w = 1.0 / (kv.second.sigma0 * kv.second.sigma0 + 1e-6);
-            //     weighted_sum += w * kv.second.Parameter.head<3>();
-            //     total_weight += w;
-            // }
-            // Vector3d avgXYZ = weighted_sum / total_weight;
-
-
-            if (cnt > 0) {
-                Vector3d avgXYZ = sumXYZ / double(cnt);
-                outfile << left << setw(6) << "AVG"
-                        << setw(15) << avgXYZ(0)
-                        << setw(15) << avgXYZ(1)
-                        << setw(15) << avgXYZ(2)
-                        << "\n";
-                outfile << "------------------------------------------------------------\n";
-
-                // 将平均 ECEF 转为 BLH 写到 outblh
-                double lat_deg, lon_deg, h;
-                ecef2blh(avgXYZ(0), avgXYZ(1), avgXYZ(2), lat_deg, lon_deg, h);
-                outblh << time_info.epoch_num << " "
-                       << time_info.week << " "
-                       << fixed << setprecision(4) << time_info.tow << " "
-                       << setw(12) << setprecision(8) << lat_deg << " "
-                       << setw(12) << setprecision(8) << lon_deg << " "
-                       << setw(12) << setprecision(4) << h << "\n";
-
-                // 保存进 all_results（用于最后的统计评估）
-                Vector4d avgParam;
-                avgParam << avgXYZ(0), avgXYZ(1), avgXYZ(2), 0.0;
-                all_results.push_back(avgParam);
-            } else {
-                // 没有任何系统解算成功
-                outfile << "WARNING: no system solution for this epoch\n";
-                outfile << "------------------------------------------------------------\n";
             }
         }
     }
 
+
     infile.close();
     outfile.close();
-    outblh.close();
+    cout << "处理完成，结果已保存至 " << outfile_path << endl;
 
-    cout << "处理完成，结果已保存至 " << outfile_path << " 和 " << outblh_path << endl;
-
-    // 如果收集到了结果，进行精度评估（使用第一个平均解作为参考）
+    // 如果收集到了结果，进行精度评估
     if (!all_results.empty()) {
-        double X0 = all_results[0](0);
-        double Y0 = all_results[0](0);
-        double Z0 = all_results[0](0);
-        vector<Vector4d> xyz_only;
-        for (auto &v : all_results) xyz_only.push_back(v);
-        EvalResult eval = evaluate(xyz_only, X0, Y0, Z0, "result");
+        // 设置参考坐标（可以设为第一个历元的解或真实坐标）
+        double X0 = -1132914.6126;  // 从你的第一个历元结果
+        double Y0 = 6092528.9442;
+        double Z0 = 1504633.0098;
+        
+        EvalResult eval = evaluate(all_results, X0, Y0, Z0, "result");
+        
+        // 输出评估结果
         ofstream eval_file("accuracy_evaluation.txt");
         eval_file << fixed << setprecision(4);
         eval_file << "========== 精度评估结果 ==========\n";
         eval_file << "位置均值: (" << eval.meanX << ", " << eval.meanY << ", " << eval.meanZ << ")\n";
         eval_file << "位置标准差: (" << eval.stdX << ", " << eval.stdY << ", " << eval.stdZ << ")\n";
-        eval_file << "ENU均值: (" << eval.meanE << ", " << eval.meanN << ", " << eval.meanU << ")\n";
-        eval_file << "ENU RMS: (" << eval.rmsE << ", " << eval.rmsN << ", " << eval.rmsU << ")\n";
+        // eval_file << "ENU均值: (" << eval.meanE << ", " << eval.meanN << ", " << eval.meanU << ")\n";
+        // eval_file << "ENU RMS: (" << eval.rmsE << ", " << eval.rmsN << ", " << eval.rmsU << ")\n";
         eval_file.close();
+        
         cout << "精度评估结果已保存至 accuracy_evaluation.txt" << endl;
     } else {
         cout << "警告：没有成功解算的历元" << endl;
