@@ -63,7 +63,8 @@ void ecef2blh(double X, double Y, double Z, double& B, double& L, double& H) {
     L = L * 180.0 / M_PI;
 }
 
-SolveResult pntpos_multi(const vector<SatData>& obs) {
+SolveResult pntpos_multi(const vector<SatData>& obs, double init_X = 0.0, double init_Y = 0.0, double init_Z = 0.0,
+                         double init_dtG = 0.0, double init_dtC = 0.0, double init_dtE = 0.0, double init_dtR = 0.0) {
     SolveResult res;
     res.success = false;
     res.Parameter = VectorXd::Zero(7);          //// X,Y,Z, dtG, dtC, dtE, dtR
@@ -86,17 +87,26 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
     // x.head<3>() = Vector3d(0, 0, 0);
 
     
-    //数据初始化
-    double Xr = 0;
-    double Yr = 0;
-    double Zr = 0;
-    double dt_GPS = 0;
-    double dt_BDS = 0;
-    double dt_GLO = 0;
-    double dt_Gal = 0;
+    // //数据初始化
+    // double Xr = 0;
+    // double Yr = 0;
+    // double Zr = 0;
+    // double dt_GPS = 0;
+    // double dt_BDS = 0;
+    // double dt_GLO = 0;
+    // double dt_Gal = 0;
+
+    //数据初始化（使用传入的初始值）
+    double Xr = init_X;
+    double Yr = init_Y;
+    double Zr = init_Z;
+    double dt_GPS = init_dtG;
+    double dt_BDS = init_dtC;
+    double dt_Gal = init_dtE;
+    double dt_GLO = init_dtR;
 
     //迭代参数
-    const int maxIter = 15;
+    const int maxIter = 30;
     const double eps = 1e-4;  //收敛阈值（m）
     
     MatrixXd H(n, 7);  //设计矩阵
@@ -105,9 +115,9 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
 
     for (int iter = 0; iter < maxIter; ++iter){
         //用Eigen来定义矩阵和向量    
-        H.setZero();
-        l.setZero();
-        W.setZero();
+        // H.setZero();
+        // l.setZero();
+        // W.setZero();
         //填充H,l,W，此时需要遍历所有星历才可以实现
         for (int i = 0; i < n;i++){
             double P_obs = cleaned_obs[i].pseudorange;
@@ -400,6 +410,16 @@ int main() {
 
     blhfile << "# 格式: Epoch Week TOW avg_lat(deg) avg_lon(deg) avg_h(m)\n";
 
+    //新增：上一历元的初始值
+    double last_X = 0.0;
+    double last_Y = 0.0;
+    double last_Z = 0.0;
+    double last_dtG = 0.0;
+    double last_dtC = 0.0;
+    double last_dtE = 0.0;
+    double last_dtR = 0.0;
+    bool first_epoch = true;
+
     string line;
     while (getline(infile, line)) {
         // 跳过空行
@@ -431,15 +451,34 @@ int main() {
             }
 
             // 进行定位解算
-            if (epoch_obs.size() >= 4) {
-                vector<double> result(4, 0.0); // 存放解 [x, y, z, dt]
+            if (epoch_obs.size() >= 7) {
+                vector<double> result(7, 0.0); // 存放解 [x, y, z, dt(4)]
                 
-                SolveResult res = pntpos_multi(epoch_obs);
+                //SolveResult res = pntpos_multi(epoch_obs);
+
+                SolveResult res;
+                if (first_epoch) {
+                    res = pntpos_multi(epoch_obs);  // 第一个历元用默认0初始
+                    first_epoch = false;
+                } else {
+                    res = pntpos_multi(epoch_obs, last_X, last_Y, last_Z, last_dtG, last_dtC, last_dtE, last_dtR);  // 后续用上一结果初始
+                }
 
                 vector<VectorXd> all_positions;
 
                 if (res.success) {
                     //all_results.push_back(res.Parameter);
+                    
+                    //更新上一历元的值
+                    last_X = res.Parameter(0);
+                    last_Y = res.Parameter(1);
+                    last_Z = res.Parameter(2);
+                    last_dtG = res.Parameter(3);
+                    last_dtC = res.Parameter(4);
+                    last_dtE = res.Parameter(5);
+                    last_dtR = res.Parameter(6);
+                    
+                    all_results.push_back(res.Parameter);
 
                     double X = res.Parameter(0);
                     double Y = res.Parameter(1);
