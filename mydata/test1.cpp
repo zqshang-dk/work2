@@ -69,7 +69,7 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
     res.Parameter = VectorXd::Zero(7);          //// X,Y,Z, dtG, dtC, dtE, dtR
     vector<SatData> cleaned_obs;
     for (int i = 0; i < obs.size(); i++) {
-        if (obs[i].pseudorange > 10000.0 && obs[i].variance>0) {  // 只保留伪距大于10000米的卫星
+        if (obs[i].pseudorange > 10000.0 && obs[i].variance>=0) {  // 只保留伪距大于10000米的卫星
             cleaned_obs.push_back(obs[i]);
         }
     }
@@ -105,7 +105,9 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
 
     for (int iter = 0; iter < maxIter; ++iter){
         //用Eigen来定义矩阵和向量    
-        
+        H.setZero();
+        l.setZero();
+        W.setZero();
         //填充H,l,W，此时需要遍历所有星历才可以实现
         for (int i = 0; i < n;i++){
             double P_obs = cleaned_obs[i].pseudorange;
@@ -437,7 +439,7 @@ int main() {
                 vector<VectorXd> all_positions;
 
                 if (res.success) {
-                    all_results.push_back(res.Parameter);
+                    //all_results.push_back(res.Parameter);
 
                     double X = res.Parameter(0);
                     double Y = res.Parameter(1);
