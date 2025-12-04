@@ -69,7 +69,7 @@ SolveResult pntpos_multi(const vector<SatData>& obs) {
     res.Parameter = VectorXd::Zero(7);          //// X,Y,Z, dtG, dtC, dtE, dtR
     vector<SatData> cleaned_obs;
     for (int i = 0; i < obs.size(); i++) {
-        if (obs[i].pseudorange > 10000000.0 && obs[i].variance>0) {  // 只保留伪距大于10000米的卫星
+        if (obs[i].pseudorange > 10000000.0&& obs[i].pseudorange<30000000.0 && obs[i].variance>0) {  // 只保留伪距大于10000米的卫星
             cleaned_obs.push_back(obs[i]);
         }
     }
